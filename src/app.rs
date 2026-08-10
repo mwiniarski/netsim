@@ -7,6 +7,14 @@ pub struct App {
     nodes: Vec<Node>,
 }
 
+#[derive(Clone, Copy)]
+pub struct NodeId(pub usize);
+
+pub trait NodeBehavior {
+    fn on_step(&self) {}
+    fn on_packet_received(&self) {}
+}
+
 pub struct Node {
     // Text inside the node (must be unique)
     pub name: &'static str,
@@ -16,11 +24,14 @@ pub struct Node {
 
     // Indexes of nodes this node connects to
     pub connections: Vec<Connection>,
+
+    // Methods defining what happens when iteracted with
+    pub behavior: Box<dyn NodeBehavior>,
 }
 
 pub struct Connection {
     // Index of the target in Node vector
-    pub target: usize,
+    pub target: NodeId,
 
     // Time of packet travel animation
     pub total_travel_time_ms: u128,
@@ -30,6 +41,26 @@ pub struct Connection {
 }
 
 impl eframe::App for App {
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = Self::millis_since_epoch();
+       
+        let mut packet_receiving_nodes = vec![];
+        for node in self.nodes.iter_mut() {
+            for connection in node.connections.iter_mut() {
+                // Remove packets that already arrived
+                while let Some(_) = connection.packet_sent_times_ms.pop_front_if(|sent_time| {
+                    now > *sent_time + connection.total_travel_time_ms
+                }) {
+                    packet_receiving_nodes.push(connection.target);
+                }
+            }
+        }
+
+        for node in packet_receiving_nodes.into_iter() {
+            self.nodes[node.0].behavior.on_packet_received();
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Panel with the settings and stats of the thing that was clicked
         egui::Panel::left("left").show_inside(ui, |ui| {
@@ -113,7 +144,7 @@ impl App {
             for connection in node.connections.iter_mut() {
 
                 let node1_center = rects[i].center();
-                let node2_center = rects[connection.target].center();
+                let node2_center = rects[connection.target.0].center();
 
                 // Draw lines
                 ui.painter().add(Shape::dashed_line(
@@ -139,15 +170,8 @@ impl App {
                     egui::FontId::default(),
                     egui::Color32::WHITE
                 );
-
-                // Remove packets that already arrived
-                while let Some(_) = connection.packet_sent_times_ms.pop_front_if(|sent_time| {
-                    now > *sent_time + connection.total_travel_time_ms
-                }) {
-                    // Here logic for packets arriving at destination
-                }
                 
-                // Draw packets sent
+                // Draw packets in flight
                 for packet_sent_ms in &connection.packet_sent_times_ms {
                     let part_travelled = (now - *packet_sent_ms) as f32 / connection.total_travel_time_ms as f32;
                     let packet_pos = node1_center + line_vec * part_travelled + offset_dir * 10.0;

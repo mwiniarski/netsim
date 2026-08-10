@@ -1,4 +1,18 @@
-use crate::app::{Node, Connection};
+use crate::app::{Node, Connection, NodeId, NodeBehavior};
+
+struct NoBehavior;
+impl NodeBehavior for NoBehavior {}
+
+struct DebugBehavior;
+impl NodeBehavior for DebugBehavior {
+    fn on_packet_received(&self) {
+        println!("Packet received!");
+    }
+
+    fn on_step(&self) {
+        println!("Step!");
+    }
+}
 
 pub fn network() -> Vec<Node> {
     vec![
@@ -7,34 +21,42 @@ pub fn network() -> Vec<Node> {
             position: egui::Pos2 { x: 50.0, y: 100.0 },
             connections: vec![
                 Connection {
-                    target: 1,
+                    target: NodeId(1),
                     total_travel_time_ms: 1000,
                     packet_sent_times_ms: std::collections::VecDeque::default(),
                 }
             ],
+            behavior: Box::new(DebugBehavior{}),
         }, 
         Node{
             name: "Leader",
             position: egui::Pos2 { x: 200.0, y: 100.0 },
             connections: vec![
                 Connection {
-                    target: 0,
-                    total_travel_time_ms: 1000,
+                    target: NodeId(2),
+                    total_travel_time_ms: 3000,
+                    packet_sent_times_ms: std::collections::VecDeque::default(),
+                },
+                Connection {
+                    target: NodeId(3),
+                    total_travel_time_ms: 2000,
                     packet_sent_times_ms: std::collections::VecDeque::default(),
                 }
             ],
+            behavior: Box::new(DebugBehavior{})
         },
-        // Node{
-        //     id: egui::Id::new("node3"),
-        //     name: "Replica 1",
-        //     position: egui::Pos2 { x: 400.0, y: 50.0 },
-        //     connections: vec![],
-        // },
-        // Node{
-        //     id: egui::Id::new("node4"),
-        //     name: "Replica 2",
-        //     position: egui::Pos2 { x: 400.0, y: 150.0 },
-        //     connections: vec![],
-        // }
+        Node{
+            name: "Replica 1",
+            position: egui::Pos2 { x: 400.0, y: 50.0 },
+            connections: vec![],
+            behavior: Box::new(DebugBehavior{})
+        },
+        Node{
+            name: "Replica 2",
+            position: egui::Pos2 { x: 400.0, y: 150.0 },
+            connections: vec![],
+            behavior: Box::new(DebugBehavior{})
+        }
     ]
 }
+
