@@ -5,60 +5,127 @@ use egui::Shape;
 
 pub struct App {
     nodes: Vec<Node>,
+    connections: Vec<Connection>,
+    packets: VecDeque<Packet>,
 }
 
-#[derive(Clone, Copy)]
+struct Packet {
+    // Connections on which the packet travels
+    connection_id: usize,
+    
+    // Contents of the packet
+    payload: String,
+    
+    // Timestamp when packet was sent
+    sent_time: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct NodeId(pub usize);
-
-pub trait NodeBehavior {
-    fn on_step(&self) {}
-    fn on_packet_received(&self) {}
-}
 
 pub struct Node {
     // Text inside the node (must be unique)
     pub name: &'static str,
-
+    
     // Top-left coordinate of a node relative to the panel
     pub position: egui::Pos2,
-
-    // Indexes of nodes this node connects to
-    pub connections: Vec<Connection>,
-
+    
     // Methods defining what happens when iteracted with
     pub behavior: Box<dyn NodeBehavior>,
+    
+    // Connections this node holds
+    pub connections: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct ConnectionId(pub usize);
+
 pub struct Connection {
+    // Index of the source in Node vector
+    pub source: NodeId,
+
     // Index of the target in Node vector
     pub target: NodeId,
 
     // Time of packet travel animation
     pub total_travel_time_ms: u128,
+}
 
-    // Distances traveled by packets
-    pub packet_sent_times_ms: VecDeque<u128>,
+pub struct NetworkContext {
+    local_node: NodeId,
+    sendable_nodes: Vec<NodeId>,
+    packets_to_send: Vec<(NodeId, String)>,
+}
+
+impl NetworkContext {
+    pub fn send_packet(&mut self, target: NodeId, payload: String) {
+        self.packets_to_send.push((target, payload));
+    }
+    
+    pub fn connections(&self) -> Vec<NodeId> {
+        self.sendable_nodes.clone()
+    }
+
+    pub fn local_node(&self) -> NodeId {
+        self.local_node
+    }
+}
+
+pub trait NodeBehavior {
+    fn on_packet_received(&self, _ctx: &mut NetworkContext, _source: NodeId, _payload: String) {}
 }
 
 impl eframe::App for App {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = Self::millis_since_epoch();
        
-        let mut packet_receiving_nodes = vec![];
-        for node in self.nodes.iter_mut() {
-            for connection in node.connections.iter_mut() {
-                // Remove packets that already arrived
-                while let Some(_) = connection.packet_sent_times_ms.pop_front_if(|sent_time| {
-                    now > *sent_time + connection.total_travel_time_ms
+        // Remove packets that already arrived
+        while let Some(packet) = self.packets.pop_front_if(|packet| {
+            now > packet.sent_time + self.connections[packet.connection_id].total_travel_time_ms
+        }) {
+            // Prepare context
+            let connection = &self.connections[packet.connection_id];
+            let local_node = connection.target;
+            
+            let sendable_connections = &self
+                .nodes[connection.target.0]
+                .connections;
+
+            let sendable_nodes = sendable_connections.iter()
+                .map(|connection_id|{
+                    self.connections[*connection_id].target
+                }).collect();
+
+            let mut ctx = NetworkContext {
+                local_node,
+                sendable_nodes,
+                packets_to_send: vec![],
+            };
+
+            // Ask node/user what they want to do
+            {
+                self.nodes[connection.target.0].behavior.on_packet_received(&mut ctx, connection.source, packet.payload);
+            }
+
+            // Act on result
+            for (node, payload) in ctx.packets_to_send {
+
+                match sendable_connections.iter().find(|connection_id| {
+                    self.connections[**connection_id].target == node
                 }) {
-                    packet_receiving_nodes.push(connection.target);
+                    Some(connection_id) => {
+                        self.packets.push_back(Packet {
+                            connection_id: *connection_id,
+                            payload,
+                            sent_time: now,
+                        });
+                    },
+                    None => {
+                        println!("Couldn't send ")
+                    }
                 }
             }
-        }
-
-        for node in packet_receiving_nodes.into_iter() {
-            self.nodes[node.0].behavior.on_packet_received();
-        }
+        }   
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -123,7 +190,7 @@ impl App {
         let now = Self::millis_since_epoch();
 
         // Draw nodes
-        for node in &mut self.nodes {
+        for (i, node) in self.nodes.iter_mut().enumerate() {
             let res = Self::paint_node(&node, ui);
             let node_rect = res.rect;
             rects.push(node_rect);
@@ -135,52 +202,62 @@ impl App {
 
             // Send a message when button clicked
             if res.clicked() {
-               node.connections[0].packet_sent_times_ms.push_back(now);
+                for (connection_id, connection) in self.connections.iter_mut().enumerate() {
+                    if connection.source.0 == i {
+                        self.packets.push_back(Packet {
+                            sent_time: now,
+                            connection_id,
+                            payload: now.to_string(),
+                        });
+                    }
+                }
             }
         }
 
         // Draw connections
-        for (i, node) in self.nodes.iter_mut().enumerate() {
-            for connection in node.connections.iter_mut() {
+        for (connection_id, connection) in self.connections.iter_mut().enumerate() {
 
-                let node1_center = rects[i].center();
-                let node2_center = rects[connection.target.0].center();
+            let source_center = rects[connection.source.0].center();
+            let target_center = rects[connection.target.0].center();
 
-                // Draw lines
-                ui.painter().add(Shape::dashed_line(
-                    &vec![node1_center, node2_center],
-                    egui::Stroke::new(1.0_f32, egui::Color32::LIGHT_GREEN),
-                    5.0f32, 
-                    5.0f32
-                ));
+            // Draw lines
+            ui.painter().add(Shape::dashed_line(
+                &vec![source_center, target_center],
+                egui::Stroke::new(1.0_f32, egui::Color32::LIGHT_GREEN),
+                5.0f32, 
+                5.0f32
+            ));
 
-                // Draw text below a line
-                let line_vec = node2_center.to_vec2() - node1_center.to_vec2();
-                let mut offset_dir = line_vec.normalized().rot90();
-                if offset_dir.y > 0.0 {
-                    offset_dir *= -1.0;
+            // Draw text below a line
+            let line_vec = target_center.to_vec2() - source_center.to_vec2();
+            let mut offset_dir = line_vec.normalized().rot90();
+            if offset_dir.y > 0.0 {
+                offset_dir *= -1.0;
+            }
+
+            let text_pos = source_center + line_vec / 2.0 - offset_dir * 20.0;
+
+            ui.painter().text(
+                text_pos, 
+                egui::Align2::CENTER_CENTER, 
+                "2s", 
+                egui::FontId::default(),
+                egui::Color32::WHITE
+            );
+
+            // Draw packets in flight
+            for packet in &self.packets {
+                if packet.connection_id != connection_id {
+                    continue
                 }
 
-                let text_pos = node1_center + line_vec / 2.0 - offset_dir * 20.0;
-
-                ui.painter().text(
-                    text_pos, 
-                    egui::Align2::CENTER_CENTER, 
-                    "2s", 
-                    egui::FontId::default(),
+                let part_travelled = (now - packet.sent_time) as f32 / connection.total_travel_time_ms as f32;
+                let packet_pos = source_center + line_vec * part_travelled + offset_dir * 10.0;
+                ui.painter().circle_filled(
+                    packet_pos,
+                    10.0,
                     egui::Color32::WHITE
                 );
-                
-                // Draw packets in flight
-                for packet_sent_ms in &connection.packet_sent_times_ms {
-                    let part_travelled = (now - *packet_sent_ms) as f32 / connection.total_travel_time_ms as f32;
-                    let packet_pos = node1_center + line_vec * part_travelled + offset_dir * 10.0;
-                    ui.painter().circle_filled(
-                        packet_pos,
-                        10.0,
-                        egui::Color32::WHITE
-                    );
-                }
             }
         }
     }
@@ -197,12 +274,30 @@ impl App {
         
     }
 
-    pub fn new(cc: &CreationContext<'_>, network: Vec<Node>) -> Self {
+    pub fn new(cc: &CreationContext<'_>, network: (Vec<Node>, Vec<Connection>)) -> Self {
 
         // Dark mode
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         
-        // todo: do some checks (e.g. if connections are valid)
-        Self { nodes: network }
+        let mut app = Self { nodes: network.0, connections: network.1, packets: VecDeque::new() };
+
+        let mut reverse_connections = vec![];
+        for connection in app.connections.iter() {
+            // Make each connection bi-directional
+            reverse_connections.push(Connection { 
+                source: connection.target, 
+                target: connection.source, 
+                total_travel_time_ms: connection.total_travel_time_ms
+            });
+        }
+        
+        // Add outgoing connection to node
+        app.connections.append(&mut reverse_connections);
+
+        for (connection_id, connection) in app.connections.iter().enumerate() {
+            app.nodes[connection.source.0].connections.push(connection_id);
+        }
+
+        app
     }
 }
