@@ -1,16 +1,15 @@
+use std::collections::VecDeque;
+
 use eframe::CreationContext;
 use egui::Shape;
 
 pub struct App {
     nodes: Vec<Node>,
     connections: Vec<Connection>,
-    packets: Vec<Packet>,
+    packets: Vec<VecDeque<Packet>>,
 }
 
 struct Packet {
-    // Connections on which the packet travels
-    connection_id: ConnectionId,
-    
     // Contents of the packet
     payload: String,
     
@@ -78,58 +77,61 @@ impl eframe::App for App {
         let now = Self::millis_since_epoch();
        
         // Remove packets that already arrived
-        let mut new_packets = vec![];
-        self.packets.retain(|packet| {
-            if now < packet.sent_time + self.connections[packet.connection_id.0].total_travel_time_ms {
-                return true;
-            }
+        for (conn_id, connection) in self.connections.iter().enumerate() {
 
-            // Prepare context
-            let connection = &self.connections[packet.connection_id.0];
-            let local_node = connection.target;
-            
-            let sendable_connections = &self
-                .nodes[local_node.0]
-                .connections;
+            while let Some(packet) = self.packets[conn_id].pop_front_if(|packet| {
+                now > packet.sent_time + connection.total_travel_time_ms
+            }) {
+                // Prepare context
+                let local_node = connection.target;
+                
+                let sendable_connections = &self
+                    .nodes[local_node.0]
+                    .connections;
+    
+                let sendable_nodes = sendable_connections.iter()
+                    .map(|connection_id|{
+                        self.connections[connection_id.0].target
+                    }).collect();
+    
+                let mut ctx = 
+                    NetworkContext {
+                        local_node,
+                        sendable_nodes,
+                        packets_to_send: vec![],
+                    };
+    
+                // Ask node/user what they want to do
+                {
+                    self.nodes[local_node.0].behavior.on_packet_received(
+                        &mut ctx, 
+                        connection.source, 
+                        packet.payload.clone()
+                    );
+                }
+    
+                // Act on result
+                for (target_node, payload) in ctx.packets_to_send {
 
-            let sendable_nodes = sendable_connections.iter()
-                .map(|connection_id|{
-                    self.connections[connection_id.0].target
-                }).collect();
+                    // Check if the requested target node is connected to the local node
+                    match sendable_connections
+                        .iter().find(|connection_id| {
+                            self.connections[connection_id.0].target == target_node
+                        }) {
+                            None => println!("Couldn't send "),
 
-            let mut ctx = NetworkContext {
-                local_node,
-                sendable_nodes,
-                packets_to_send: vec![],
-            };
-
-            // Ask node/user what they want to do
-            {
-                self.nodes[local_node.0].behavior.on_packet_received(&mut ctx, connection.source, packet.payload.clone());
-            }
-
-            // Act on result
-            for (target_node, payload) in ctx.packets_to_send {
-                match sendable_connections.iter().find(|connection_id| {
-                    self.connections[connection_id.0].target == target_node
-                }) {
-                    Some(connection_id) => {
-                        new_packets.push(Packet {
-                            connection_id: *connection_id,
-                            payload,
-                            sent_time: now,
-                        });
-                    },
-                    None => {
-                        println!("Couldn't send ")
-                    }
+                            // It is connected! Add packet to queue
+                            Some(connection_id) => {
+                                self.packets[connection_id.0].push_back(
+                                    Packet {
+                                        payload,
+                                        sent_time: now,
+                                    });
+                            },
+                        }
                 }
             }
-            
-            false
-        });
-
-        self.packets.append(&mut new_packets);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -208,9 +210,8 @@ impl App {
             if res.clicked() {
                 for (conn_id, connection) in self.connections.iter_mut().enumerate() {
                     if connection.source == NodeId(node_id) {
-                        self.packets.push(Packet {
+                        self.packets[conn_id].push_back(Packet {
                             sent_time: now,
-                            connection_id: ConnectionId(conn_id),
                             payload: now.to_string(),
                         });
                     }
@@ -250,11 +251,7 @@ impl App {
             );
 
             // Draw packets in flight
-            for packet in &self.packets {
-                if packet.connection_id != ConnectionId(conn_id) {
-                    continue
-                }
-
+            for packet in &self.packets[conn_id] {
                 let part_travelled = (now - packet.sent_time) as f32 / connection.total_travel_time_ms as f32;
                 let packet_pos = source_center + line_vec * part_travelled + offset_dir * 10.0;
                 ui.painter().circle_filled(
@@ -283,8 +280,12 @@ impl App {
         // Dark mode
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         
-        let mut app = Self { nodes: network.0, connections: network.1, packets: vec![] };
-
+        let mut app = Self { 
+            nodes: network.0, 
+            packets: vec![],
+            connections: network.1, 
+        };
+        
         // Make all connections bi-directional
         let mut reverse_connections = vec![];
         for connection in app.connections.iter() {
@@ -300,7 +301,9 @@ impl App {
         for (conn_id, connection) in app.connections.iter().enumerate() {
             app.nodes[connection.source.0].connections.push(ConnectionId(conn_id));
         }
-
+        
+        // Make sure each connection has an empty VecDeq in packets container
+        app.packets.resize_with(app.connections.len(), VecDeque::new);
         app
     }
 }
