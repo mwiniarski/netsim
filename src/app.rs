@@ -1,17 +1,15 @@
-use std::collections::VecDeque;
-
 use eframe::CreationContext;
 use egui::Shape;
 
 pub struct App {
     nodes: Vec<Node>,
     connections: Vec<Connection>,
-    packets: VecDeque<Packet>,
+    packets: Vec<Packet>,
 }
 
 struct Packet {
     // Connections on which the packet travels
-    connection_id: usize,
+    connection_id: ConnectionId,
     
     // Contents of the packet
     payload: String,
@@ -34,7 +32,7 @@ pub struct Node {
     pub behavior: Box<dyn NodeBehavior>,
     
     // Connections this node holds
-    pub connections: Vec<usize>,
+    pub connections: Vec<ConnectionId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
@@ -80,20 +78,23 @@ impl eframe::App for App {
         let now = Self::millis_since_epoch();
        
         // Remove packets that already arrived
-        while let Some(packet) = self.packets.pop_front_if(|packet| {
-            now > packet.sent_time + self.connections[packet.connection_id].total_travel_time_ms
-        }) {
+        let mut new_packets = vec![];
+        self.packets.retain(|packet| {
+            if now < packet.sent_time + self.connections[packet.connection_id.0].total_travel_time_ms {
+                return true;
+            }
+
             // Prepare context
-            let connection = &self.connections[packet.connection_id];
+            let connection = &self.connections[packet.connection_id.0];
             let local_node = connection.target;
             
             let sendable_connections = &self
-                .nodes[connection.target.0]
+                .nodes[local_node.0]
                 .connections;
 
             let sendable_nodes = sendable_connections.iter()
                 .map(|connection_id|{
-                    self.connections[*connection_id].target
+                    self.connections[connection_id.0].target
                 }).collect();
 
             let mut ctx = NetworkContext {
@@ -104,17 +105,16 @@ impl eframe::App for App {
 
             // Ask node/user what they want to do
             {
-                self.nodes[connection.target.0].behavior.on_packet_received(&mut ctx, connection.source, packet.payload);
+                self.nodes[local_node.0].behavior.on_packet_received(&mut ctx, connection.source, packet.payload.clone());
             }
 
             // Act on result
-            for (node, payload) in ctx.packets_to_send {
-
+            for (target_node, payload) in ctx.packets_to_send {
                 match sendable_connections.iter().find(|connection_id| {
-                    self.connections[**connection_id].target == node
+                    self.connections[connection_id.0].target == target_node
                 }) {
                     Some(connection_id) => {
-                        self.packets.push_back(Packet {
+                        new_packets.push(Packet {
                             connection_id: *connection_id,
                             payload,
                             sent_time: now,
@@ -125,7 +125,11 @@ impl eframe::App for App {
                     }
                 }
             }
-        }   
+            
+            false
+        });
+
+        self.packets.append(&mut new_packets);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -190,7 +194,7 @@ impl App {
         let now = Self::millis_since_epoch();
 
         // Draw nodes
-        for (i, node) in self.nodes.iter_mut().enumerate() {
+        for (node_id, node) in self.nodes.iter_mut().enumerate() {
             let res = Self::paint_node(&node, ui);
             let node_rect = res.rect;
             rects.push(node_rect);
@@ -202,11 +206,11 @@ impl App {
 
             // Send a message when button clicked
             if res.clicked() {
-                for (connection_id, connection) in self.connections.iter_mut().enumerate() {
-                    if connection.source.0 == i {
-                        self.packets.push_back(Packet {
+                for (conn_id, connection) in self.connections.iter_mut().enumerate() {
+                    if connection.source == NodeId(node_id) {
+                        self.packets.push(Packet {
                             sent_time: now,
-                            connection_id,
+                            connection_id: ConnectionId(conn_id),
                             payload: now.to_string(),
                         });
                     }
@@ -215,7 +219,7 @@ impl App {
         }
 
         // Draw connections
-        for (connection_id, connection) in self.connections.iter_mut().enumerate() {
+        for (conn_id, connection) in self.connections.iter_mut().enumerate() {
 
             let source_center = rects[connection.source.0].center();
             let target_center = rects[connection.target.0].center();
@@ -247,7 +251,7 @@ impl App {
 
             // Draw packets in flight
             for packet in &self.packets {
-                if packet.connection_id != connection_id {
+                if packet.connection_id != ConnectionId(conn_id) {
                     continue
                 }
 
@@ -279,23 +283,22 @@ impl App {
         // Dark mode
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         
-        let mut app = Self { nodes: network.0, connections: network.1, packets: VecDeque::new() };
+        let mut app = Self { nodes: network.0, connections: network.1, packets: vec![] };
 
+        // Make all connections bi-directional
         let mut reverse_connections = vec![];
         for connection in app.connections.iter() {
-            // Make each connection bi-directional
-            reverse_connections.push(Connection { 
+            reverse_connections.push(Connection {
                 source: connection.target, 
                 target: connection.source, 
                 total_travel_time_ms: connection.total_travel_time_ms
             });
         }
+        app.connections.append(&mut reverse_connections);
         
         // Add outgoing connection to node
-        app.connections.append(&mut reverse_connections);
-
-        for (connection_id, connection) in app.connections.iter().enumerate() {
-            app.nodes[connection.source.0].connections.push(connection_id);
+        for (conn_id, connection) in app.connections.iter().enumerate() {
+            app.nodes[connection.source.0].connections.push(ConnectionId(conn_id));
         }
 
         app
